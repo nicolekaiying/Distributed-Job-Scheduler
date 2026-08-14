@@ -1,0 +1,23 @@
+[
+  {
+    "job_id": "job-1",
+    "status": "pending",
+    "attempts": 0,
+    "claimed_time": 1786724415.186649
+  },
+  {
+    "job_id": "job-2",
+    "status": "pending",
+    "attempts": 0
+  },
+  {
+    "job_id": "job-3",
+    "status": "pending",
+    "attempts": 0
+  },
+  {
+    "job_id": "job-4",
+    "status": "pending",
+    "attempts": 0
+  }
+]
