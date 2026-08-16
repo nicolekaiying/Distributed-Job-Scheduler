@@ -3,6 +3,7 @@ import json
 import os
 import threading
 import time
+import psycopg2
 from dis import roll_decide
 
 max_attempts = 3
@@ -13,16 +14,48 @@ tasks = [
     {"job_id": "job-3", "status": "pending", "attempts": 0},
 ]
 
+conn = psycopg2.connect(
+    dbname="djs",
+    user="kais",
+    host="localhost",
+    port=5432
+)
+
+cur = conn.cursor()
+
 def handle_client(conn):
     one_job = None
 
-    with job_lock:
-        for queue in loaded_tasks:
-            if queue["status"] == "pending":
-                one_job = queue
-                one_job["status"] = "running"
-                one_job["claimed_time"] = time.time() 
-                break
+    cur.execute("SELECT * FROM tasks WHERE status = 'pending' LIMIT 1")
+    result = cur.fetchone()
+
+    if result is None:
+        conn.send(json.dumps({"job": None}).encode())
+    else:
+        queue_job = {
+                "job_id": result[0],
+                "status": result[1],
+                "attempts": result[2],
+                "claimed_time": result[3]
+            }
+
+        cur.execute("UPDATE tasks SET status = %s WHERE job_id = %s", ('running', queue_job["job_id"]))
+        conn.commit()
+        conn.send(json.dumps({"job": queue_job}).encode())
+
+        job_back = conn.recv(1024)
+        job_text = job_back.decode()
+        job_result = json.loads(job_text)
+
+        if job_result["status"] == "success":
+            job_status = "success"
+        elif job_result["attempts"] < max_attempts:
+            job_status = "pending"
+        else:
+            job_status = "dead"
+
+        cur.execute("UPDATE tasks SET status = %s, attempts = %s WHERE job_id = %s", (job_status, job_result['attempts'], job_result['job_id']))
+
     
     data = conn.recv(1024)
     print(data)
@@ -64,15 +97,6 @@ def monitor_stuck_jobs():
                         with open("tasks.json", "w") as f: 
                             json.dump(loaded_tasks, f, indent=2)
                         print(f"Reclaimed stale job: {queue['job_id']}") #explicit prints to ensure heartbeat is working.
-
-if os.path.exists("tasks.json"): 
-    with open("tasks.json", "r") as f: 
-        loaded_tasks = json.load(f)
-else: 
-    with open("tasks.json", "w") as y:
-        json.dump(tasks, y)
-        with open("tasks.json", "r") as x:
-            loaded_tasks = json.load(x)
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind(("localhost", 5001))
