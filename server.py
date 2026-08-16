@@ -1,6 +1,5 @@
 import socket
 import json
-import os
 import threading
 import time
 import psycopg2
@@ -8,26 +7,30 @@ from dis import roll_decide
 
 max_attempts = 3
 
-tasks = [
-    {"job_id": "job-1", "status": "pending", "attempts": 0},
-    {"job_id": "job-2", "status": "pending", "attempts": 0},
-    {"job_id": "job-3", "status": "pending", "attempts": 0},
-]
+def handle_client(conn):
 
-conn = psycopg2.connect(
+    db_conn = psycopg2.connect(
     dbname="djs",
     user="kais",
     host="localhost",
     port=5432
-)
+    )
+    cur = db_conn.cursor()
 
-cur = conn.cursor()
+    data = conn.recv(1024)
+    print(data)
 
-def handle_client(conn):
     one_job = None
 
-    cur.execute("SELECT * FROM tasks WHERE status = 'pending' LIMIT 1")
+    claimed_time = time.time()
+
+    cur.execute("""
+        UPDATE tasks SET status = %s, claimed_time = %s
+        WHERE job_id = (SELECT job_id FROM tasks WHERE status = 'pending' LIMIT 1)
+        RETURNING *
+    """, ("running", claimed_time))
     result = cur.fetchone()
+    db_conn.commit()
 
     if result is None:
         conn.send(json.dumps({"job": None}).encode())
@@ -39,8 +42,6 @@ def handle_client(conn):
                 "claimed_time": result[3]
             }
 
-        cur.execute("UPDATE tasks SET status = %s WHERE job_id = %s", ('running', queue_job["job_id"]))
-        conn.commit()
         conn.send(json.dumps({"job": queue_job}).encode())
 
         job_back = conn.recv(1024)
@@ -55,48 +56,36 @@ def handle_client(conn):
             job_status = "dead"
 
         cur.execute("UPDATE tasks SET status = %s, attempts = %s WHERE job_id = %s", (job_status, job_result['attempts'], job_result['job_id']))
+        db_conn.commit()
 
-    
-    data = conn.recv(1024)
-    print(data)
-
-    if one_job is None: 
-        conn.send(json.dumps({"job": None}).encode())
-    else:
-        conn.send(json.dumps({"job": one_job}).encode())
-        result_data = conn.recv(1024)
-        result_text = result_data.decode()
-        result = json.loads(result_text)
-        print(result)
-
-        with job_lock:
-            for queue in loaded_tasks:
-                if queue["job_id"] == result["job_id"]:
-                    queue["attempts"] = result["attempts"]
-                    if result["status"] == "success":
-                        queue["status"] = "success"
-                    elif result["attempts"] < max_attempts:
-                        queue["status"] = "pending"
-                    else:
-                        queue["status"] = "dead"
-
-            with open("tasks.json", "w") as f:
-                json.dump(loaded_tasks, f, indent=2) #indent=2 just makes the json file easier to read.
+    db_conn.close()
 
 def monitor_stuck_jobs():
+
+    db_conn = psycopg2.connect(
+        dbname="djs",
+        user="kais",
+        host="localhost",
+        port=5432
+    )
+    cur = db_conn.cursor()
+
     while True:
         time.sleep(5)
-        print("[CHECKING FOR STUCK JOBS]")
-        with job_lock: 
-            for queue in loaded_tasks:
-                if queue["status"] == "running":
-                    elapsed_time = time.time() - queue["claimed_time"]
-                    print(f"[{queue['job_id']} HAS BEEN ELAPSING FOR {elapsed_time} SECONDS]")
-                    if elapsed_time > 10:
-                        queue["status"] = "pending"
-                        with open("tasks.json", "w") as f: 
-                            json.dump(loaded_tasks, f, indent=2)
-                        print(f"Reclaimed stale job: {queue['job_id']}") #explicit prints to ensure heartbeat is working.
+        print("[Checking for stuck jobs.]")
+
+        cur.execute("SELECT * from tasks WHERE status = 'running'")
+        rows = cur.fetchall()
+
+        for row in rows:
+            job_id = row[0]
+            job_claim_time = row[3]
+            elapsed_time = time.time() - job_claim_time
+
+            if elapsed_time > 10:
+                cur.execute("UPDATE tasks SET status = %s WHERE job_id = %s", ("pending", job_id))
+                db_conn.commit()
+                print(f"{job_id} reclaimed.")
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind(("localhost", 5001))
