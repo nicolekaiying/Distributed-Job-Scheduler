@@ -7,6 +7,8 @@ import json
 curr_port = int(sys.argv[1])
 other_ports = [int(p) for p in sys.argv[2:]]
 last_hb_recv = {port: time.time() for port in other_ports}
+all_ports = other_ports + [curr_port]
+leader_port = max(all_ports)
 
 def listen_port():
     global last_hb_recv
@@ -40,11 +42,28 @@ def check_dead_leader():
     global last_hb_recv
     while True:
         time.sleep(5)
-        for port in other_ports:
-            elapsed = time.time() - last_hb_recv[port]
-            print(f"Time since last heartbeat {elapsed:.1f} seconds..")
-            if elapsed > 15:
-                print(f"Coordinator on {port} appears dead, starting leader election..")
+        if leader_port == curr_port:
+            continue
+
+        elapsed = time.time() - last_hb_recv[leader_port]
+        print(f"Time since last heartbeat from leader ({leader_port}): {elapsed:.1f} seconds..")
+        if elapsed > 15:
+            print(f"Leader on {leader_port} appears dead...")
+            promote_new_leader()
+
+def promote_new_leader():
+    global leader_port
+    alive_ports = [curr_port]
+
+    for port in other_ports:
+        if port == leader_port:
+            continue
+        elapsed = time.time() - last_hb_recv[port]
+        if elapsed < 15:
+            alive_ports.append(port)
+        leader_port = max(alive_ports)
+
+    print(f"New leader elected: {leader_port}.")
 
 thread = threading.Thread(target=listen_port)
 thread.start()
@@ -59,3 +78,4 @@ while True:
 
     time.sleep(2)
     print("Coordinator running...")
+    
