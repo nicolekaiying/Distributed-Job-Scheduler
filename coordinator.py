@@ -8,10 +8,11 @@ curr_port = int(sys.argv[1])
 other_ports = [int(p) for p in sys.argv[2:]]
 last_hb_recv = {port: time.time() for port in other_ports}
 all_ports = other_ports + [curr_port]
-leader_port = max(all_ports)
+leader_port = None
+term = 0
 
 def listen_port():
-    global last_hb_recv
+    global last_hb_recv, leader_port, term
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(('localhost', curr_port))
     server.listen()
@@ -21,13 +22,28 @@ def listen_port():
         data = conn.recv(1024)
         msg = json.loads(data.decode())
 
+        if msg["type"] == "who_is_leader":
+            reply = {"leader_port": leader_port, "term": term}
+            conn.send(json.dumps(reply).encode())
+            continue
+            
+        if msg["term"] < term:
+            print(f"Ignoring outdated message from term {msg['term']}, current term is {term}.")
+            continue
+
+        if msg["term"] > term:
+            term = msg["term"]
+            if msg["type"] == "new_leader":
+                leader_port = msg["leader_port"]
+            print(f"Updated to term {term}")
+
         if msg["type"] == "heartbeat":
             sender = msg["from_port"]
             last_hb_recv[sender] = time.time()
             print(f"Heartbeat detected from port {sender}")
         elif msg["type"] == "new_leader":
             leader_port = msg["leader_port"]
-            print(f"New leader port {leader_port} notified.")
+            print(f"New leader port {leader_port} {term}.")
 
 def check_status():
     while True:
@@ -36,7 +52,7 @@ def check_status():
             try:
                 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 client.connect(('localhost', port))
-                msg = {"type": "heartbeat", "from_port": curr_port}
+                msg = {"type": "heartbeat", "from_port": curr_port, "term": term}
                 client.send(json.dumps(msg).encode())
                 client.close()
 
@@ -57,7 +73,7 @@ def check_dead_leader():
             promote_new_leader()
 
 def promote_new_leader():
-    global leader_port
+    global leader_port, term
     alive_ports = [curr_port]
 
     for port in other_ports:
@@ -67,21 +83,52 @@ def promote_new_leader():
         if elapsed < 15:
             alive_ports.append(port)
 
-        new_leader = max(alive_ports)
-        leader_port = new_leader
-        print(f"New leader elected: {leader_port}.")
+    new_leader = max(alive_ports)
 
-        for port in other_ports:
-            if port == new_leader:
-                continue
-            try:
-                client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                client.connect(('localhost', port))
-                msg = {"type": "new_leader", "leader_port": leader_port}
-                client.send(json.dumps(msg).encode())
-                client.close()
-            except ConnectionRefusedError:
-                print(f"Could not reach {port} to announce new leader.")
+    if new_leader != curr_port:
+        return
+
+    term += 1
+    leader_port = new_leader
+    print(f"New leader elected: {leader_port} term {term}.")
+
+    for port in other_ports:
+        if port == new_leader:
+            continue
+        try:
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.connect(('localhost', port))
+            msg = {"type": "new_leader", "leader_port": leader_port, "term": term}
+            client.send(json.dumps(msg).encode())
+            client.close()
+        except ConnectionRefusedError:
+            print(f"Could not reach {port} to announce new leader.")
+
+def ask_who_is_leader():
+    global leader_port, term
+    for port in other_ports:
+        try:
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.connect(('localhost', port))
+            client.send(json.dumps({"type": "who_is_leader"}).encode())
+            response = client.recv(1024)
+            reply = json.loads(response.decode())
+            client.close()
+
+            if reply["term"] > term:
+                term = reply["term"]
+                leader_port = reply["leader_port"]
+                print(f"Learned from {port}: leader is {leader_port}, term {term}")
+                return
+        except ConnectionRefusedError:
+            continue
+
+def startup():
+    global leader_port, term
+    leader_port = max(all_ports)
+    ask_who_is_leader()
+
+startup()
 
 thread = threading.Thread(target=listen_port)
 thread.start()
