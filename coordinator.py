@@ -20,9 +20,14 @@ def listen_port():
         conn, addr = server.accept()
         data = conn.recv(1024)
         msg = json.loads(data.decode())
-        sender = msg['from_port']
-        last_hb_recv[sender] = time.time()
-        print(f"Heartbeat detected from {sender} ")
+
+        if msg["type"] == "heartbeat":
+            sender = msg["from_port"]
+            last_hb_recv[sender] = time.time()
+            print(f"Heartbeat detected from port {sender}")
+        elif msg["type"] == "new_leader":
+            leader_port = msg["leader_port"]
+            print(f"New leader port {leader_port} notified.")
 
 def check_status():
     while True:
@@ -31,7 +36,7 @@ def check_status():
             try:
                 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 client.connect(('localhost', port))
-                msg = {"from_port": curr_port}
+                msg = {"type": "heartbeat", "from_port": curr_port}
                 client.send(json.dumps(msg).encode())
                 client.close()
 
@@ -61,9 +66,22 @@ def promote_new_leader():
         elapsed = time.time() - last_hb_recv[port]
         if elapsed < 15:
             alive_ports.append(port)
-        leader_port = max(alive_ports)
 
-    print(f"New leader elected: {leader_port}.")
+        new_leader = max(alive_ports)
+        leader_port = new_leader
+        print(f"New leader elected: {leader_port}.")
+
+        for port in other_ports:
+            if port == new_leader:
+                continue
+            try:
+                client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client.connect(('localhost', port))
+                msg = {"type": "new_leader", "leader_port": leader_port}
+                client.send(json.dumps(msg).encode())
+                client.close()
+            except ConnectionRefusedError:
+                print(f"Could not reach {port} to announce new leader.")
 
 thread = threading.Thread(target=listen_port)
 thread.start()
