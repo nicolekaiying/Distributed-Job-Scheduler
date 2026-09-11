@@ -4,13 +4,24 @@ import time
 import random
 from dis import roll_decide
 
-client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client.connect(("localhost", 5001))
-time.sleep(random.uniform(0.5, 1.5))
-client.send(b"give me a job.")
-data = client.recv(1024)
-text = data.decode()              
-job_schd = json.loads(text)            
+worker_ports = [5001, 5002, 5003]
+
+for port in worker_ports:
+    try: 
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.connect(('localhost', port))
+        client.send(b"Give me a job...")
+        data = client.recv(1024)
+        job_schd = json.loads(data.decode())
+
+        if "error" in job_schd and job_schd["error"] == "not_leader":
+            print(f"{port} is not the leader, trying another port.")
+            continue
+
+        break
+    except ConnectionRefusedError:
+        continue
+
 
 if job_schd["job"] is None:
     print("No job at the moment.")

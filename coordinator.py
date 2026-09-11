@@ -3,13 +3,17 @@ import socket
 import time
 import sys
 import json
+import psycopg2
 
 curr_port = int(sys.argv[1])
-other_ports = [int(p) for p in sys.argv[2:]]
+worker_port = int(sys.argv[2])
+other_ports = [int(p) for p in sys.argv[3:]]
 last_hb_recv = {port: time.time() for port in other_ports}
 all_ports = other_ports + [curr_port]
 leader_port = None
+
 term = 0
+max_attempts = 3
 
 def listen_port():
     global last_hb_recv, leader_port, term
@@ -123,6 +127,82 @@ def ask_who_is_leader():
         except ConnectionRefusedError:
             continue
 
+def handle_worker(conn):
+
+    try:
+        print("connecting to database.")
+        db_conn = psycopg2.connect(
+        dbname="djs",
+        user="kais",
+        host="localhost",
+        port=5432
+        )
+        cur = db_conn.cursor()
+        print("database connecting successfully...")
+
+        data = conn.recv(1024)
+        print(data)
+
+        one_job = None
+
+        claimed_time = time.time()
+
+        cur.execute("""
+            UPDATE tasks SET status = %s, claimed_time = %s
+            WHERE job_id = (SELECT job_id FROM tasks WHERE status = 'pending' LIMIT 1)
+            RETURNING *
+        """, ("running", claimed_time))
+        result = cur.fetchone()
+        db_conn.commit()
+
+        if result is None:
+            conn.send(json.dumps({"job": None}).encode())
+        else:
+            queue_job = {
+                    "job_id": result[0],
+                    "status": result[1],
+                    "attempts": result[2],
+                    "claimed_time": result[3]
+                }
+
+            conn.send(json.dumps({"job": queue_job}).encode())
+
+            job_back = conn.recv(1024)
+            job_text = job_back.decode()
+            job_result = json.loads(job_text)
+
+            if job_result["status"] == "success":
+                job_status = "success"
+            elif job_result["attempts"] < max_attempts:
+                job_status = "pending"
+            else:
+                job_status = "dead"
+
+            cur.execute("UPDATE tasks SET status = %s, attempts = %s WHERE job_id = %s", (job_status, job_result['attempts'], job_result['job_id']))
+            db_conn.commit()
+
+        db_conn.close()
+
+    except Exception as e:
+        print(f"CRASH in handle_worker: {e}")
+
+def listen_for_workers():
+    worker_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    worker_server.bind(('localhost', worker_port))
+    worker_server.listen()
+
+    while True:
+        conn, addr = worker_server.accept()
+        print("Worker connection accepted, leader_port is:", leader_port, "curr_port is:", curr_port)
+
+        if leader_port != curr_port:
+            conn.send(json.dumps({"error": "not_leader", "leader_port": leader_port}).encode())
+            conn.close()
+            continue
+
+        worker_thread = threading.Thread(target=handle_worker, args=(conn,))
+        worker_thread.start()
+
 def startup():
     global leader_port, term
     leader_port = max(all_ports)
@@ -138,6 +218,9 @@ heartbeat_thread.start()
 
 check_dead_thread = threading.Thread(target=check_dead_leader)
 check_dead_thread.start()
+
+worker_listener_thread = threading.Thread(target=listen_for_workers)
+worker_listener_thread.start()
 
 while True:
 
