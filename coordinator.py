@@ -7,7 +7,7 @@ import psycopg2
 
 curr_port = int(sys.argv[1])
 worker_port = int(sys.argv[2])
-other_ports = [int(p) for p in sys.argv[3:]]
+other_ports = []
 last_hb_recv = {port: time.time() for port in other_ports}
 all_ports = other_ports + [curr_port]
 leader_port = None
@@ -203,9 +203,57 @@ def listen_for_workers():
         worker_thread = threading.Thread(target=handle_worker, args=(conn,))
         worker_thread.start()
 
+def register_once():
+    db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+    cur = db_conn.cursor()
+
+    cur.execute("""
+        INSERT INTO coordinators (curr_port, worker_port, last_seen)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (curr_port) DO UPDATE SET last_seen = %s, worker_port = %s
+    """, (curr_port, worker_port, time.time(), time.time(), worker_port))
+
+    db_conn.commit()
+    db_conn.close()
+
+
+def discover_coords():
+    db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+    cur = db_conn.cursor()
+
+    cur.execute("SELECT curr_port FROM coordinators WHERE curr_port != %s AND last_seen > %s", (curr_port, time.time() - 15))
+    rows = cur.fetchall()
+    db_conn.close()
+
+    ports = []
+    for row in rows:
+        ports.append(row[0])
+
+    return ports
+
+def register_self():
+    db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+    cur = db_conn.cursor()
+
+    while True:
+        time.sleep(5)
+        cur.execute("UPDATE coordinators SET last_seen = %s WHERE curr_port = %s", (time.time(), curr_port))
+        db_conn.commit()
+
 def startup():
-    global leader_port, term
+    global leader_port, term, other_ports, all_ports, last_hb_recv
+
+    register_once()
+
+    print("Settling — discovering peers before deciding leadership...")
+    time.sleep(10)
+
+    other_ports = discover_coords()
+    all_ports = other_ports + [curr_port]
+    last_hb_recv = {port: time.time() for port in other_ports}
     leader_port = max(all_ports)
+    print(f"Settled. Known peers: {other_ports}. Leader: {leader_port}")
+
     ask_who_is_leader()
 
 startup()
@@ -221,6 +269,9 @@ check_dead_thread.start()
 
 worker_listener_thread = threading.Thread(target=listen_for_workers)
 worker_listener_thread.start()
+
+register_thread = threading.Thread(target=register_self)
+register_thread.start()
 
 while True:
 
