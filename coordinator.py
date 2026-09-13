@@ -4,6 +4,7 @@ import time
 import sys
 import json
 import psycopg2
+from psycopg2 import pool
 
 curr_port = int(sys.argv[1])
 worker_port = int(sys.argv[2])
@@ -130,12 +131,7 @@ def ask_who_is_leader():
 def handle_worker(conn):
 
     try:
-        db_conn = psycopg2.connect(
-        dbname="djs",
-        user="kais",
-        host="localhost",
-        port=5432
-        )
+        db_conn = db_pool.getconn()
         cur = db_conn.cursor()
 
         data = conn.recv(1024)
@@ -176,10 +172,12 @@ def handle_worker(conn):
             cur.execute("UPDATE tasks SET status = %s, attempts = %s WHERE job_id = %s", (job_status, job_result['attempts'], job_result['job_id']))
             db_conn.commit()
 
-        db_conn.close()
-
     except Exception as e:
         print(f"CRASH in handle_worker: {e}")
+
+    finally:
+        if db_conn is not None:
+            db_pool.putconn(db_conn)
 
 def listen_for_workers():
     worker_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -250,6 +248,15 @@ def startup():
     ask_who_is_leader()
 
 startup()
+
+db_pool = pool.SimpleConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dbname="djs",
+    user="kais",
+    host="localhost",
+    port=5432
+)
 
 thread = threading.Thread(target=listen_port)
 thread.start()
