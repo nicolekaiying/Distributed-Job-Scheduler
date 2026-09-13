@@ -130,7 +130,6 @@ def ask_who_is_leader():
 def handle_worker(conn):
 
     try:
-        print("connecting to database.")
         db_conn = psycopg2.connect(
         dbname="djs",
         user="kais",
@@ -138,12 +137,8 @@ def handle_worker(conn):
         port=5432
         )
         cur = db_conn.cursor()
-        print("database connecting successfully...")
 
         data = conn.recv(1024)
-        print(data)
-
-        one_job = None
 
         claimed_time = time.time()
 
@@ -193,7 +188,6 @@ def listen_for_workers():
 
     while True:
         conn, addr = worker_server.accept()
-        print("Worker connection accepted, leader_port is:", leader_port, "curr_port is:", curr_port)
 
         if leader_port != curr_port:
             conn.send(json.dumps({"error": "not_leader", "leader_port": leader_port}).encode())
@@ -215,7 +209,6 @@ def register_once():
 
     db_conn.commit()
     db_conn.close()
-
 
 def discover_coords():
     db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)

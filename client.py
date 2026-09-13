@@ -19,7 +19,6 @@ while True:
             job_schd = json.loads(data.decode())
 
             if "error" in job_schd and job_schd["error"] == "not_leader":
-                print(f"{port} is not the leader, trying another port.")
                 job_schd = None
                 continue
 
