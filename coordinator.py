@@ -143,10 +143,18 @@ def handle_worker(conn):
         claimed_time = time.time()
 
         cur.execute("""
-            UPDATE tasks SET status = %s, claimed_time = %s
-            WHERE job_id = (SELECT job_id FROM tasks WHERE status = 'pending' LIMIT 1)
-            RETURNING *
-        """, ("running", claimed_time))
+            WITH next_job AS (
+            SELECT job_id FROM tasks
+            WHERE status = 'pending'
+            ORDER BY created_time ASC, job_id ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE tasks SET status = %s, claimed_time = %s
+        WHERE job_id = (SELECT job_id FROM next_job)
+        RETURNING *
+        """,("running", claimed_time))
+
         result = cur.fetchone()
         db_conn.commit()
 
@@ -227,13 +235,23 @@ def discover_coords():
     return ports
 
 def register_self():
-    db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
-    cur = db_conn.cursor()
+    db_conn = None
 
     while True:
         time.sleep(5)
-        cur.execute("UPDATE coordinators SET last_seen = %s WHERE curr_port = %s", (time.time(), curr_port))
-        db_conn.commit()
+
+        try:
+            if db_conn is None:
+                db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+                cur = db_conn.cursor()
+
+            if db_conn is not None:
+                cur.execute("UPDATE coordinators SET last_seen = %s WHERE curr_port = %s", (time.time(), curr_port))
+                db_conn.commit()
+
+        except psycopg2.OperationalError as e:
+            db_conn = None
+            print("[RECONNECTING] to database.")
 
 def monitor_stuck_jobs():
 
@@ -245,9 +263,11 @@ def monitor_stuck_jobs():
 
         print("[CHECKING] for stuck Jobs.")
 
-        db_conn = db_pool.getconn()
+        broken = False
+        db_conn = None
 
         try:
+            db_conn = db_pool.getconn()
             cur = db_conn.cursor()
             cur.execute("SELECT * FROM tasks WHERE status = 'running'")
             rows = cur.fetchall()
@@ -262,8 +282,13 @@ def monitor_stuck_jobs():
                     db_conn.commit()
                     print(f"[RECLAIMED] Job: {job_id}.")
 
+        except psycopg2.OperationalError as e:
+            print(f"[RECONNECTING] pool connection was broken: {e}")
+            broken = True
+
         finally:
-            db_pool.putconn(db_conn)
+            if db_conn is not None:
+                db_pool.putconn(db_conn, close=broken)
 
 def startup():
     global leader_port, term, other_ports, all_ports, last_hb_recv

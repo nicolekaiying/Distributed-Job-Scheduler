@@ -1,4 +1,5 @@
 import psycopg2
+import time
 
 conn = psycopg2.connect(
     dbname="djs",
@@ -26,6 +27,16 @@ cur.execute("""
         worker_port INTEGER,
         last_seen DOUBLE PRECISION
     )
+""")
+
+cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS created_time DOUBLE PRECISION DEFAULT extract(epoch from now())")
+cur.execute("UPDATE tasks SET created_time = %s WHERE created_time IS NULL", (time.time(),))
+
+cur.execute("""
+    INSERT INTO tasks (job_id, status, attempts, created_time) VALUES
+  ('zeta', 'pending', 0, extract(epoch from now())),
+  ('alpha', 'pending', 0, extract(epoch from now()) + 10),
+  ('beta', 'pending', 0, extract(epoch from now()) + 20);
 """)
 
 conn.commit()
