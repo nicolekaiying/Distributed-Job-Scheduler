@@ -20,8 +20,17 @@ cur.execute("""
     )
 """)
 
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS coordinators (
+        curr_port INTEGER PRIMARY KEY,
+        worker_port INTEGER,
+        last_seen DOUBLE PRECISION
+    )
+""")
+
 conn.commit()
-print("[Table created successfully.]")
+
+print("[Tables created successfully.]")
 
 # cur.execute(
 #     "INSERT INTO tasks (job_id, status, attempts, claimed_time) VALUES (%s, %s, %s, %s)", 
@@ -31,14 +40,14 @@ print("[Table created successfully.]")
 # conn.commit()
 # print("[VALUES INSERTED]")
 
-cur.execute("SELECT * FROM tasks WHERE status = 'pending' LIMIT 1")
-result = cur.fetchone()
+# cur.execute("SELECT * FROM tasks WHERE status = 'pending' LIMIT 1")
+# result = cur.fetchone()
 
-if result is None:
-    print("[No pending jobs at the moment.]")
-else:
-    job_id = result[0]
-    cur.execute("UPDATE tasks SET status = %s WHERE job_id = %s", ("running", job_id))
-    conn.commit()
+# if result is None:
+#     print("[No pending jobs at the moment.]")
+# else:
+#     job_id = result[0]
+#     cur.execute("UPDATE tasks SET status = %s WHERE job_id = %s", ("running", job_id))
+#     conn.commit()
 
 conn.close()

@@ -25,7 +25,11 @@ def listen_port():
     while True:
         conn, addr = server.accept()
         data = conn.recv(1024)
-        msg = json.loads(data.decode())
+        try:
+            msg = json.loads(data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            print(f"Ignoring bad message: {e}")
+            continue
 
         if msg["type"] == "who_is_leader":
             reply = {"leader_port": leader_port, "term": term}
@@ -231,6 +235,36 @@ def register_self():
         cur.execute("UPDATE coordinators SET last_seen = %s WHERE curr_port = %s", (time.time(), curr_port))
         db_conn.commit()
 
+def monitor_stuck_jobs():
+
+    while True:
+        time.sleep(5)
+
+        if leader_port != curr_port:
+            continue
+
+        print("[CHECKING] for stuck Jobs.")
+
+        db_conn = db_pool.getconn()
+
+        try:
+            cur = db_conn.cursor()
+            cur.execute("SELECT * FROM tasks WHERE status = 'running'")
+            rows = cur.fetchall()
+
+            for row in rows:
+                job_id = row[0]
+                claimed_time = row[3]
+                elapsed = time.time() - claimed_time
+
+                if elapsed > 10:
+                    cur.execute("UPDATE tasks SET status = %s WHERE job_id = %s", ("pending", job_id))
+                    db_conn.commit()
+                    print(f"[RECLAIMED] Job: {job_id}.")
+
+        finally:
+            db_pool.putconn(db_conn)
+
 def startup():
     global leader_port, term, other_ports, all_ports, last_hb_recv
 
@@ -272,6 +306,9 @@ worker_listener_thread.start()
 
 register_thread = threading.Thread(target=register_self)
 register_thread.start()
+
+stuck_job_thread = threading.Thread(target=monitor_stuck_jobs)
+stuck_job_thread.start()
 
 while True:
 
