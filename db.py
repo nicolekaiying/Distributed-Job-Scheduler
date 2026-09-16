@@ -32,12 +32,20 @@ cur.execute("""
 cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS created_time DOUBLE PRECISION DEFAULT extract(epoch from now())")
 cur.execute("UPDATE tasks SET created_time = %s WHERE created_time IS NULL", (time.time(),))
 
+# cur.execute("""
+#     INSERT INTO tasks (job_id, status, attempts, created_time) VALUES
+#   ('zeta', 'pending', 0, extract(epoch from now())),
+#   ('alpha', 'pending', 0, extract(epoch from now()) + 10),
+#   ('beta', 'pending', 0, extract(epoch from now()) + 20);
+# """)
+
 cur.execute("""
-    INSERT INTO tasks (job_id, status, attempts, created_time) VALUES
-  ('zeta', 'pending', 0, extract(epoch from now())),
-  ('alpha', 'pending', 0, extract(epoch from now()) + 10),
-  ('beta', 'pending', 0, extract(epoch from now()) + 20);
+    CREATE TABLE IF NOT EXISTS election (
+        id INTEGER PRIMARY KEY,
+        term INTEGER NOT NULL DEFAULT 0
+    )
 """)
+cur.execute("INSERT INTO election (id, term) VALUES (1, 0) ON CONFLICT (id) DO NOTHING")
 
 conn.commit()
 

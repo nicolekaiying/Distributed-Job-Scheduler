@@ -44,15 +44,15 @@ def listen_port():
             term = msg["term"]
             if msg["type"] == "new_leader":
                 leader_port = msg["leader_port"]
-            print(f"Updated to term {term}")
+            print(f"[UPDATED] Term to {term}")
 
         if msg["type"] == "heartbeat":
             sender = msg["from_port"]
             last_hb_recv[sender] = time.time()
             print(f"Heartbeat detected from port {sender}")
         elif msg["type"] == "new_leader":
-            leader_port = msg["leader_port"]
-            print(f"New leader port {leader_port} {term}.")
+            last_hb_recv[msg["leader_port"]] = time.time()
+            print(f"Got new_leader claim for {msg['leader_port']} (term {msg['term']}); current leader is {leader_port} at term {term}.")
 
 def check_status():
     while True:
@@ -75,7 +75,7 @@ def check_dead_leader():
         if leader_port == curr_port:
             continue
 
-        elapsed = time.time() - last_hb_recv[leader_port]
+        elapsed = time.time() - last_hb_recv.get(leader_port, 0) #Using brackets because [] demands the key exists, () falls back to 0 if it doesnt exists.
         print(f"Time since last heartbeat from leader ({leader_port}): {elapsed:.1f} seconds..")
         if elapsed > 15:
             print(f"Leader on {leader_port} appears dead...")
@@ -92,14 +92,23 @@ def promote_new_leader():
         if elapsed < 15:
             alive_ports.append(port)
 
+    if len(alive_ports) <= len(all_ports)/2:
+        print(f"[UNREACHABLE] Only {len(alive_ports)} of {len(all_ports)} coordinators reachable -- Waiting.")
+        return
+
     new_leader = max(alive_ports)
 
     if new_leader != curr_port:
         return
 
-    term += 1
+    try:
+        term = next_term()
+    except psycopg2.OperationalError as e:
+        print(f"Could not reach database to allocate a term: {e}")
+        return
+
     leader_port = new_leader
-    print(f"New leader elected: {leader_port} term {term}.")
+    print(f"[ELECTED] {leader_port} elected as new Leader, term {term}.")
 
     for port in other_ports:
         if port == new_leader:
@@ -114,7 +123,10 @@ def promote_new_leader():
             print(f"Could not reach {port} to announce new leader.")
 
 def ask_who_is_leader():
-    global leader_port, term
+    global leader_port, term, last_hb_recv
+    best_term = term
+    best_leader = leader_port
+
     for port in other_ports:
         try:
             client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -124,13 +136,18 @@ def ask_who_is_leader():
             reply = json.loads(response.decode())
             client.close()
 
-            if reply["term"] > term:
-                term = reply["term"]
-                leader_port = reply["leader_port"]
-                print(f"Learned from {port}: leader is {leader_port}, term {term}")
-                return
-        except ConnectionRefusedError:
+            if reply["leader_port"] is not None and reply["term"] >= best_term:
+                best_term = reply["term"]
+                best_leader = reply["leader_port"]
+        except (ConnectionRefusedError, ConnectionResetError, json.JSONDecodeError):
             continue
+
+    term = best_term
+    leader_port = best_leader
+
+    if leader_port is not None:
+        last_hb_recv.setdefault(leader_port, time.time()) #Falls back to time.time() only if key is missing.
+        print(f"[LEARNED] Leader is {leader_port}, term {term}")
 
 def handle_worker(conn):
 
@@ -185,7 +202,7 @@ def handle_worker(conn):
             db_conn.commit()
 
     except Exception as e:
-        print(f"CRASH in handle_worker: {e}")
+        print(f"[CRASH] in handle_worker: {e}")
 
     finally:
         if db_conn is not None:
@@ -248,6 +265,7 @@ def register_self():
             if db_conn is not None:
                 cur.execute("UPDATE coordinators SET last_seen = %s WHERE curr_port = %s", (time.time(), curr_port))
                 db_conn.commit()
+                refresh_peers()
 
         except psycopg2.OperationalError as e:
             db_conn = None
@@ -290,21 +308,63 @@ def monitor_stuck_jobs():
             if db_conn is not None:
                 db_pool.putconn(db_conn, close=broken)
 
+def next_term():
+    db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+
+    try:
+        cur = db_conn.cursor()
+        cur.execute("UPDATE election SET term = term + 1 WHERE id = 1 RETURNING term")
+        new_term = cur.fetchone()[0] #Return the value inside the tuple.
+        db_conn.commit()
+        return new_term
+        
+    finally:
+        db_conn.close()
+
+def current_term():
+    db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+
+    try:
+        cur = db_conn.cursor()
+        cur.execute("SELECT term FROM election WHERE id = 1")
+        return cur.fetchone()[0]
+    
+    finally:
+        db_conn.close()
+
+def refresh_peers():
+    global other_ports, all_ports, last_hb_recv
+
+    discovered = discover_coords()
+
+    for port in discovered:
+        if port not in other_ports:
+            other_ports.append(port)
+            last_hb_recv.setdefault(port, time.time())
+            print(f"[DISCOVERED] New peer on port {port}")
+
+    all_ports = other_ports + [curr_port]
+
 def startup():
     global leader_port, term, other_ports, all_ports, last_hb_recv
 
     register_once()
+    term = current_term()
 
-    print("Settling — discovering peers before deciding leadership...")
+    print("[SETTLING] Discovering peers before deciding leadership.")
     time.sleep(10)
 
     other_ports = discover_coords()
     all_ports = other_ports + [curr_port]
     last_hb_recv = {port: time.time() for port in other_ports}
-    leader_port = max(all_ports)
-    print(f"Settled. Known peers: {other_ports}. Leader: {leader_port}")
+    leader_port = None
 
     ask_who_is_leader()
+
+    if leader_port is None:
+        promote_new_leader()
+
+    print(f"[SETTLED] Known peers: {other_ports}. Leader: {leader_port}")
 
 startup()
 
