@@ -24,35 +24,36 @@ def listen_port():
 
     while True:
         conn, addr = server.accept()
-        data = conn.recv(1024)
-        try:
-            msg = json.loads(data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            print(f"Ignoring bad message: {e}")
-            continue
+        with conn: #Using with conn because there are multiple loop bodies, this ensures conn gets closed whatever happens.
+            data = conn.recv(1024)
+            try:
+                msg = json.loads(data.decode())
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                print(f"Ignoring bad message: {e}")
+                continue
 
-        if msg["type"] == "who_is_leader":
-            reply = {"leader_port": leader_port, "term": term}
-            conn.send(json.dumps(reply).encode())
-            continue
-            
-        if msg["term"] < term:
-            print(f"Ignoring outdated message from term {msg['term']}, current term is {term}.")
-            continue
+            if msg["type"] == "who_is_leader":
+                reply = {"leader_port": leader_port, "term": term}
+                conn.send(json.dumps(reply).encode())
+                continue
+                
+            if msg["term"] < term:
+                print(f"[OUTDATED] Message from term {msg['term']}, current term is {term}.")
+                continue
 
-        if msg["term"] > term:
-            term = msg["term"]
-            if msg["type"] == "new_leader":
-                leader_port = msg["leader_port"]
-            print(f"[UPDATED] Term to {term}")
+            if msg["term"] > term:
+                term = msg["term"]
+                if msg["type"] == "new_leader":
+                    leader_port = msg["leader_port"]
+                print(f"[UPDATED] Term to {term}")
 
-        if msg["type"] == "heartbeat":
-            sender = msg["from_port"]
-            last_hb_recv[sender] = time.time()
-            print(f"Heartbeat detected from port {sender}")
-        elif msg["type"] == "new_leader":
-            last_hb_recv[msg["leader_port"]] = time.time()
-            print(f"Got new_leader claim for {msg['leader_port']} (term {msg['term']}); current leader is {leader_port} at term {term}.")
+            if msg["type"] == "heartbeat":
+                sender = msg["from_port"]
+                last_hb_recv[sender] = time.time()
+                print(f"Heartbeat detected from port {sender}")
+            elif msg["type"] == "new_leader":
+                last_hb_recv[msg["leader_port"]] = time.time()
+                print(f"[NEW LEADER] Claim for {msg['leader_port']} (term {msg['term']}); current leader is {leader_port} at term {term}.")
 
 def check_status():
     while True:
@@ -66,7 +67,7 @@ def check_status():
                 client.close()
 
             except ConnectionRefusedError:
-                print(f'Could not reach coordinator on port {port}')
+                print(f'[UNREACHABLE] on port {port}.')
 
 def check_dead_leader():
     global last_hb_recv
@@ -76,9 +77,9 @@ def check_dead_leader():
             continue
 
         elapsed = time.time() - last_hb_recv.get(leader_port, 0) #Using brackets because [] demands the key exists, () falls back to 0 if it doesnt exists.
-        print(f"Time since last heartbeat from leader ({leader_port}): {elapsed:.1f} seconds..")
+        print(f"[{leader_port} | LEADER] Time since last heartbeat: {elapsed:.1f} seconds.")
         if elapsed > 15:
-            print(f"Leader on {leader_port} appears dead...")
+            print(f"[LEADER] on {leader_port} appears dead.")
             promote_new_leader()
 
 def promote_new_leader():
@@ -120,7 +121,7 @@ def promote_new_leader():
             client.send(json.dumps(msg).encode())
             client.close()
         except ConnectionRefusedError:
-            print(f"Could not reach {port} to announce new leader.")
+            print(f"{port}] Could not be reach to announce new leader.")
 
 def ask_who_is_leader():
     global leader_port, term, last_hb_recv
@@ -207,6 +208,7 @@ def handle_worker(conn):
     finally:
         if db_conn is not None:
             db_pool.putconn(db_conn)
+        conn.close()
 
 def listen_for_workers():
     worker_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -301,7 +303,7 @@ def monitor_stuck_jobs():
                     print(f"[RECLAIMED] Job: {job_id}.")
 
         except psycopg2.OperationalError as e:
-            print(f"[RECONNECTING] pool connection was broken: {e}")
+            print(f"[RECONNECTING] Pool connection was broken: {e}")
             broken = True
 
         finally:
