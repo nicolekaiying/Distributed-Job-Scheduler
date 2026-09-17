@@ -4,6 +4,7 @@ import time
 import sys
 import json
 import psycopg2
+import os
 from psycopg2 import pool
 
 curr_port = int(sys.argv[1])
@@ -19,7 +20,13 @@ max_attempts = 3
 def listen_port():
     global last_hb_recv, leader_port, term
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(('localhost', curr_port))
+
+    try:
+        server.bind(('localhost', curr_port))
+    except OSError as e:
+        print(f"Cannot bind port {curr_port}: {e}")
+        os._exit(1)
+
     server.listen()
 
     while True:
@@ -104,7 +111,7 @@ def promote_new_leader():
 
     try:
         term = next_term()
-    except psycopg2.OperationalError as e:
+    except psycopg2.Error as e:
         print(f"Could not reach database to allocate a term: {e}")
         return
 
@@ -151,6 +158,7 @@ def ask_who_is_leader():
         print(f"[LEARNED] Leader is {leader_port}, term {term}")
 
 def handle_worker(conn):
+    db_conn = None
 
     try:
         db_conn = db_pool.getconn()
@@ -212,7 +220,13 @@ def handle_worker(conn):
 
 def listen_for_workers():
     worker_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    worker_server.bind(('localhost', worker_port))
+
+    try:
+        worker_server.bind(('localhost', worker_port))
+    except OSError as e:
+        print(f"Cannot bind port {worker_port}: {e}")
+        os._exit(1)
+    
     worker_server.listen()
 
     while True:
@@ -269,7 +283,7 @@ def register_self():
                 db_conn.commit()
                 refresh_peers()
 
-        except psycopg2.OperationalError as e:
+        except psycopg2.Error as e:
             db_conn = None
             print("[RECONNECTING] to database.")
 
@@ -294,7 +308,7 @@ def monitor_stuck_jobs():
 
             for row in rows:
                 job_id = row[0]
-                claimed_time = row[3]
+                claimed_time = row[3] or 0 #Safety measure for if it returns NULL.
                 elapsed = time.time() - claimed_time
 
                 if elapsed > 10:
@@ -302,7 +316,7 @@ def monitor_stuck_jobs():
                     db_conn.commit()
                     print(f"[RECLAIMED] Job: {job_id}.")
 
-        except psycopg2.OperationalError as e:
+        except psycopg2.Error as e:
             print(f"[RECONNECTING] Pool connection was broken: {e}")
             broken = True
 
@@ -372,7 +386,7 @@ startup()
 
 db_pool = pool.SimpleConnectionPool(
     minconn=1,
-    maxconn=10,
+    maxconn=25,
     dbname="djs",
     user="kais",
     host="localhost",

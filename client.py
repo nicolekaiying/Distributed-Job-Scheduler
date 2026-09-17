@@ -46,4 +46,4 @@ while True:
 
         client.send(json.dumps(curr_job).encode())
 
-    time.sleep(3)
+    time.sleep(0.05)
