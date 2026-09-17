@@ -12,6 +12,7 @@ worker_port = int(sys.argv[2])
 my_host = os.environ.get("COORD_HOST", "localhost")
 db_host = os.environ.get("DB_HOST", "localhost")
 peer_hosts = {}
+voted_in_term = 0
 other_ports = []
 last_hb_recv = {port: time.time() for port in other_ports}
 all_ports = other_ports + [curr_port]
@@ -21,7 +22,7 @@ term = 0
 max_attempts = 3
 
 def listen_port():
-    global last_hb_recv, leader_port, term
+    global last_hb_recv, leader_port, term, voted_in_term
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
@@ -46,6 +47,14 @@ def listen_port():
                 reply = {"leader_port": leader_port, "term": term}
                 conn.send(json.dumps(reply).encode())
                 continue
+
+            if msg["type"] == "request_vote":
+                grant = msg["term"] > voted_in_term and msg["term"] >= term
+                if grant:
+                    voted_in_term = msg["term"]
+                    print(f"[VOTE] Granted to {msg['candidate_port']} for term {msg['term']}.")
+                    conn.send(json.dumps({"vote_granted": grant}).encode())
+                    continue
                 
             if msg["term"] < term:
                 print(f"[OUTDATED] Message from term {msg['term']}, current term is {term}.")
@@ -103,46 +112,63 @@ def check_dead_leader():
             print(f"[LEADER] on {leader_port} appears dead.")
             promote_new_leader()
 
-def promote_new_leader():
-    global leader_port, term
-    alive_ports = [curr_port]
+def request_votes(candidate_term):
+    votes = 1
 
     for port in other_ports:
-        if port == leader_port:
-            continue
-        elapsed = time.time() - last_hb_recv[port]
-        if elapsed < 15:
-            alive_ports.append(port)
+        try:
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.settimeout(3)
+            client.connect((peer_hosts.get(port, 'localhost'), port))
+            client.send(json.dumps({"type": "request_vote", "term": candidate_term, "candidate_port": curr_port}).encode())
+            reply = json.loads(client.recv(1024).decode())
+            client.close()
 
-    if len(alive_ports) <= len(all_ports)/2:
-        print(f"[UNREACHABLE] Only {len(alive_ports)} of {len(all_ports)} coordinators reachable -- Waiting.")
+            if reply.get("vote_granted"):
+                votes += 1
+        except (OSError, json.JSONDecodeError):
+            continue
+
+    return votes
+
+def promote_new_leader():
+    global leader_port, term
+
+    alive_ports = [curr_port] + [p for p in other_ports if time.time() - last_hb_recv.get(p, 0) < 15]
+
+    if len(alive_ports) <= len(all_ports) / 2:
+        print(f"[WAITING] Only {len(alive_ports)} of {len(all_ports)} reachable.")
         return
 
-    new_leader = max(alive_ports)
-
-    if new_leader != curr_port:
+    if max(alive_ports) != curr_port:
         return
 
     try:
-        term = next_term()
+        candidate_term = next_term()
     except psycopg2.Error as e:
         print(f"Could not reach database to allocate a term: {e}")
         return
 
-    leader_port = new_leader
-    print(f"[ELECTED] {leader_port} elected as new Leader, term {term}.")
+    votes = request_votes(candidate_term)
+
+    if votes <= len(all_ports) / 2:
+        print(f"[LOST] Only {votes} of {len(all_ports)} votes for term {candidate_term}.")
+        return
+
+    term = candidate_term
+    leader_port = curr_port
+    print(f"[ELECTED] {curr_port} won {votes}/{len(all_ports)} votes, term {term}.")
 
     for port in other_ports:
-        if port == new_leader:
-            continue
         try:
             client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             client.connect((peer_hosts.get(port, 'localhost'), port))
-            msg = {"type": "new_leader", "leader_port": leader_port, "term": term}
-            client.send(json.dumps(msg).encode())
+            client.send(json.dumps({"type": "new_leader",
+                                    "leader_port": leader_port,
+                                    "term": term}).encode())
             client.close()
         except OSError:
-            print(f"{port}] Could not be reach to announce new leader.")
+            print(f"Could not reach {port} to announce new leader.")
 
 def ask_who_is_leader():
     global leader_port, term, last_hb_recv

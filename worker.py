@@ -2,7 +2,7 @@ import socket
 import json
 import time
 import os
-from jobsim import roll_decide
+from job_sim import roll_decide
 
 targets = os.environ.get("WORKER_TARGETS", "localhost:5001,localhost:5002,localhost:5003")
 worker_targets = [(h, int(p)) for h, p in (t.split(":") for t in targets.split(","))]
