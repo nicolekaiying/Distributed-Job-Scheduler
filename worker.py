@@ -1,19 +1,20 @@
 import socket
 import json
 import time
-import random
-from dis import roll_decide
+import os
+from jobsim import roll_decide
 
-worker_ports = [5001, 5002, 5003]
+targets = os.environ.get("WORKER_TARGETS", "localhost:5001,localhost:5002,localhost:5003")
+worker_targets = [(h, int(p)) for h, p in (t.split(":") for t in targets.split(","))]
 
 while True:
 
     job_schd = None
 
-    for port in worker_ports:
+    for host, port in worker_targets:
         try: 
             client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client.connect(('localhost', port))
+            client.connect((host, port))
             client.send(b"Give me a job...")
             data = client.recv(1024)
             job_schd = json.loads(data.decode())
@@ -23,7 +24,7 @@ while True:
                 continue
 
             break
-        except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError):
+        except OSError:
             continue
 
     if job_schd is None:
@@ -34,6 +35,8 @@ while True:
 
     if job_schd["job"] is None:
         print("No job at the moment.")
+        time.sleep(2)
+        continue
     else:
         curr_job = job_schd["job"]
         success = roll_decide()

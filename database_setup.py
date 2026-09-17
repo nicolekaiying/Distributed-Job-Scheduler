@@ -1,10 +1,13 @@
 import psycopg2
 import time
+import os
+
+db_host = os.environ.get("DB_HOST", "localhost") 
 
 conn = psycopg2.connect(
     dbname="djs",
     user="kais",
-    host="localhost",
+    host=db_host,
     port=5432
 )
 
@@ -46,6 +49,8 @@ cur.execute("""
     )
 """)
 cur.execute("INSERT INTO election (id, term) VALUES (1, 0) ON CONFLICT (id) DO NOTHING")
+
+cur.execute("ALTER TABLE coordinators ADD COLUMN IF NOT EXISTS host TEXT DEFAULT 'localhost'")
 
 conn.commit()
 

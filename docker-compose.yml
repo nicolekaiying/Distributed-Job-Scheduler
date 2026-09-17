@@ -1,0 +1,63 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: kais
+      POSTGRES_DB: djs
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kais -d djs"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  coord1:
+    build: .
+    command: python3 -u coordinator.py 6001 5001
+    environment:
+      COORD_HOST: coord1
+      DB_HOST: db
+    ports:
+      - "6001:6001"
+      - "5001:5001"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  coord2:
+    build: .
+    command: python3 -u coordinator.py 6002 5002
+    environment:
+      COORD_HOST: coord2
+      DB_HOST: db
+    ports:
+      - "6002:6002"
+      - "5002:5002"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  coord3:
+    build: .
+    command: python3 -u coordinator.py 6003 5003
+    environment:
+      COORD_HOST: coord3
+      DB_HOST: db
+    ports:
+      - "6003:6003"
+      - "5003:5003"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+        build: .
+        command: python3 -u worker.py
+        environment:
+          WORKER_TARGETS: coord1:5001,coord2:5002,coord3:5003
+        depends_on:
+          - coord1
+          - coord2
+          - coord3

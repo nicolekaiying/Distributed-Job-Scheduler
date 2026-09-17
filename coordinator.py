@@ -9,6 +9,9 @@ from psycopg2 import pool
 
 curr_port = int(sys.argv[1])
 worker_port = int(sys.argv[2])
+my_host = os.environ.get("COORD_HOST", "localhost")
+db_host = os.environ.get("DB_HOST", "localhost")
+peer_hosts = {}
 other_ports = []
 last_hb_recv = {port: time.time() for port in other_ports}
 all_ports = other_ports + [curr_port]
@@ -22,7 +25,7 @@ def listen_port():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
-        server.bind(('localhost', curr_port))
+        server.bind(('0.0.0.0', curr_port)) #Listen on all network interfaces
     except OSError as e:
         print(f"Cannot bind port {curr_port}: {e}")
         os._exit(1)
@@ -52,12 +55,12 @@ def listen_port():
                 term = msg["term"]
                 if msg["type"] == "new_leader":
                     leader_port = msg["leader_port"]
-                print(f"[UPDATED] Term to {term}")
+                print(f"[UPDATED] Term to {term}.")
 
             if msg["type"] == "heartbeat":
                 sender = msg["from_port"]
                 last_hb_recv[sender] = time.time()
-                print(f"Heartbeat detected from port {sender}")
+                print(f"[HEARTBEAT] Detected from port {sender}.")
             elif msg["type"] == "new_leader":
                 last_hb_recv[msg["leader_port"]] = time.time()
                 print(f"[NEW LEADER] Claim for {msg['leader_port']} (term {msg['term']}); current leader is {leader_port} at term {term}.")
@@ -68,23 +71,34 @@ def check_status():
         for port in other_ports:
             try:
                 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                client.connect(('localhost', port))
+                client.connect((peer_hosts.get(port, 'localhost'), port)) #Fallsback to localhost if port doesnt exists
                 msg = {"type": "heartbeat", "from_port": curr_port, "term": term}
                 client.send(json.dumps(msg).encode())
                 client.close()
 
-            except ConnectionRefusedError:
+            except OSError:
                 print(f'[UNREACHABLE] on port {port}.')
 
 def check_dead_leader():
-    global last_hb_recv
+    global last_hb_recv, leader_port
     while True:
         time.sleep(5)
+
         if leader_port == curr_port:
+            alive = [curr_port] + [p for p in other_ports
+                                   if time.time() - last_hb_recv.get(p, 0) < 15]
+
+            if len(alive) <= len(all_ports) / 2:
+                print(f"[STEPPING DOWN] Only {len(alive)} of {len(all_ports)} reachable.")
+                leader_port = None
+            continue
+
+        if leader_port is None:
+            promote_new_leader()
             continue
 
         elapsed = time.time() - last_hb_recv.get(leader_port, 0) #Using brackets because [] demands the key exists, () falls back to 0 if it doesnt exists.
-        print(f"[{leader_port} | LEADER] Time since last heartbeat: {elapsed:.1f} seconds.")
+        print(f"[LEADER|{leader_port}] Time since last heartbeat: {elapsed:.1f} seconds.")
         if elapsed > 15:
             print(f"[LEADER] on {leader_port} appears dead.")
             promote_new_leader()
@@ -123,11 +137,11 @@ def promote_new_leader():
             continue
         try:
             client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client.connect(('localhost', port))
+            client.connect((peer_hosts.get(port, 'localhost'), port))
             msg = {"type": "new_leader", "leader_port": leader_port, "term": term}
             client.send(json.dumps(msg).encode())
             client.close()
-        except ConnectionRefusedError:
+        except OSError:
             print(f"{port}] Could not be reach to announce new leader.")
 
 def ask_who_is_leader():
@@ -138,7 +152,7 @@ def ask_who_is_leader():
     for port in other_ports:
         try:
             client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client.connect(('localhost', port))
+            client.connect((peer_hosts.get(port, 'localhost'), port))
             client.send(json.dumps({"type": "who_is_leader"}).encode())
             response = client.recv(1024)
             reply = json.loads(response.decode())
@@ -147,7 +161,7 @@ def ask_who_is_leader():
             if reply["leader_port"] is not None and reply["term"] >= best_term:
                 best_term = reply["term"]
                 best_leader = reply["leader_port"]
-        except (ConnectionRefusedError, ConnectionResetError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
             continue
 
     term = best_term
@@ -222,7 +236,7 @@ def listen_for_workers():
     worker_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
-        worker_server.bind(('localhost', worker_port))
+        worker_server.bind(('0.0.0.0', worker_port))
     except OSError as e:
         print(f"Cannot bind port {worker_port}: {e}")
         os._exit(1)
@@ -241,31 +255,31 @@ def listen_for_workers():
         worker_thread.start()
 
 def register_once():
-    db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+    db_conn = psycopg2.connect(dbname="djs", user="kais", host=db_host, port=5432)
     cur = db_conn.cursor()
 
     cur.execute("""
-        INSERT INTO coordinators (curr_port, worker_port, last_seen)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (curr_port) DO UPDATE SET last_seen = %s, worker_port = %s
-    """, (curr_port, worker_port, time.time(), time.time(), worker_port))
+        INSERT INTO coordinators (curr_port, worker_port, host, last_seen)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (curr_port) DO UPDATE SET last_seen = %s, worker_port = %s, host = %s
+    """, (curr_port, worker_port, my_host, time.time(), time.time(), worker_port, my_host))
 
     db_conn.commit()
     db_conn.close()
 
 def discover_coords():
-    db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+    db_conn = psycopg2.connect(dbname="djs", user="kais", host=db_host, port=5432)
     cur = db_conn.cursor()
 
-    cur.execute("SELECT curr_port FROM coordinators WHERE curr_port != %s AND last_seen > %s", (curr_port, time.time() - 15))
+    cur.execute("SELECT curr_port, host FROM coordinators WHERE curr_port != %s AND last_seen > %s", (curr_port, time.time() - 15))
     rows = cur.fetchall()
     db_conn.close()
 
-    ports = []
+    found = {}
     for row in rows:
-        ports.append(row[0])
+        found[row[0]] = row[1]
 
-    return ports
+    return found
 
 def register_self():
     db_conn = None
@@ -275,7 +289,7 @@ def register_self():
 
         try:
             if db_conn is None:
-                db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+                db_conn = psycopg2.connect(dbname="djs", user="kais", host=db_host, port=5432)
                 cur = db_conn.cursor()
 
             if db_conn is not None:
@@ -325,7 +339,7 @@ def monitor_stuck_jobs():
                 db_pool.putconn(db_conn, close=broken)
 
 def next_term():
-    db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+    db_conn = psycopg2.connect(dbname="djs", user="kais", host=db_host, port=5432)
 
     try:
         cur = db_conn.cursor()
@@ -338,7 +352,7 @@ def next_term():
         db_conn.close()
 
 def current_term():
-    db_conn = psycopg2.connect(dbname="djs", user="kais", host="localhost", port=5432)
+    db_conn = psycopg2.connect(dbname="djs", user="kais", host=db_host, port=5432)
 
     try:
         cur = db_conn.cursor()
@@ -353,7 +367,9 @@ def refresh_peers():
 
     discovered = discover_coords()
 
-    for port in discovered:
+    for port, host in discovered.items(): #.items() returns dictionary's key-value pairs.
+        peer_hosts[port] = host
+
         if port not in other_ports:
             other_ports.append(port)
             last_hb_recv.setdefault(port, time.time())
@@ -362,7 +378,7 @@ def refresh_peers():
     all_ports = other_ports + [curr_port]
 
 def startup():
-    global leader_port, term, other_ports, all_ports, last_hb_recv
+    global leader_port, term, other_ports, all_ports, last_hb_recv, peer_hosts
 
     register_once()
     term = current_term()
@@ -370,7 +386,9 @@ def startup():
     print("[SETTLING] Discovering peers before deciding leadership.")
     time.sleep(10)
 
-    other_ports = discover_coords()
+    discovered = discover_coords()
+    peer_hosts.update(discovered) #Merge dictionaries
+    other_ports = list(discovered.keys())
     all_ports = other_ports + [curr_port]
     last_hb_recv = {port: time.time() for port in other_ports}
     leader_port = None
@@ -389,7 +407,7 @@ db_pool = pool.SimpleConnectionPool(
     maxconn=25,
     dbname="djs",
     user="kais",
-    host="localhost",
+    host=db_host,
     port=5432
 )
 
@@ -414,5 +432,5 @@ stuck_job_thread.start()
 while True:
 
     time.sleep(2)
-    print("Coordinator running...")
+    print("...")
     
